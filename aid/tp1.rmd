@@ -1,0 +1,611 @@
+---
+title: "Trabajo Práctico 1"
+author: "Agustín Herrera"
+output:
+   html_document:
+     toc: yes
+     code_folding: show
+     toc_float: yes
+     df_print: paged
+     theme: united
+     code_download: true
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+library(dplyr)
+library(readxl)
+library(moments)
+library(ggplot2)
+```
+# Carga de los datos
+
+Se toma el dataset disponible en: https://www.kaggle.com/competitions/fcen-dm-2024-prediccin-precio-de-propiedades
+
+De la base de datos, se toman los datos de entrenamiento.
+
+A los registros se les aplicó los siguientes filtros:
+
+l1 - Nivel administrativo 1: (Argentina).
+
+l2 - Nivel administrativo 2: (Capital Federal).
+
+property_type - Tipo de propiedad: (PH).
+
+Operation_type - Tipo de operación: (Venta).
+
+## Carga del archivo Excel
+
+```{r lectura_datos}
+
+dataset <- read_excel("datos_tp1.xlsx")
+nrow(dataset)
+```
+
+## Selección de la muestra
+
+Para la base de datos seleccionada se generó una muestra aleatoria de tamaño n = 500 utilizando como semilla los últimos tres dígitos del DNI (893).
+
+```{r seleccion_muestra}
+
+set.seed(893)
+datos_orig <- dataset %>%
+  sample_n(size=500,replace=FALSE)
+```
+
+# Graficación de variables cuantitativas y preprocesamiento de los datos
+Se incluye la sección con gráficos de variables cuantitativas puesto que estos gráficos fueron el disparador de un preprocesamiento de los datos. Es decir que se eligieron rangos razonables para las variables estudiadas, y se descartaron del análisis los datos que se encontraran por fuera.
+
+Concretamente, se toman los datos en los cuales la latitud sea menor a -34 grados, y la superficie total sea menor a 5000 metros cuadrados. Con estos filtros, se ve que los puntos quedan contenidos dentro de una región geográfica que podría compararse con la circunscripta en los límites de la Ciudad Autónoma de Buenos Aires. (Aclaración: los valores de latitud y longitud se intercambian porque estaban intercambiados y mal asignados los nombres de las columnas en el dataset original.)
+
+Luego se intercambiaron los valores de superficie total y superficie cubierta, cuando la cubierta era mayor que la total.
+Se imputaron los valores faltantes de superficie con su contrapartida correspondiente, es decir, cuando faltaba la superficie total se imputó con la superficie cubierta y viceversa. Aquí cabe hacer la salvedad de que la superficie cubierta se imputó con la mediana de la proporción de la superficie cubierta sobre la total, multiplicada por la superficie total. Si se empleaba directamente la total, la aproximación resultaba demasiado grosera, puesto que resultaba en valores excesivamente altos de superficie cubierta.
+
+Luego se imputó las habitaciones (bedrooms) con la cantidad de ambientes (rooms) menos uno. Se imputó los baños con el valor 1 en caso de que faltara el valor. Se realizan otras imputaciones a fin de completar los campos rooms, bedrooms y bathrooms en unos pocos registros.
+
+Por último, se quitó la primera entrada de la muestra de datos por ser un "Edificio de departamentos tipo PH", y tratarse más bien de un conjunto de siete PHs, y por lo tanto no encajar estrictamente en la categoría propuesta para el análisis, y contrastar excesivamente con el resto de los datos de la muestra. El incluir esta entrada distorsionaba los resultados de los análisis.
+
+Asimismo, se elimina un registro duplicado.
+
+Se muestran los histogramas correspondientes a la cantidad de ambientes, habitaciones y baños, y de precio de las propiedades, junto con un gráfico de cajas del precio. Los histogramas muestran perfiles razonables, y si bien se observan valores extremos compatibles con outliers, al observar los datos concretos vemos que son reales, y que encajan en el subconjunto del dataset original que define la población estudiada y, por lo tanto, no los excluimos del análisis.
+
+```{r graficos_cuantitativas}
+
+datos <- datos_orig
+datos <- distinct(datos)
+
+#Swapeamos los datos de latitud y longitud.
+datos$tmp <- datos$lon
+datos$lon <- datos$lat
+datos$lat <- datos$tmp
+datos$tmp <- NULL
+
+#datos_filtrados_geo <- datos[datos$lat <= -34, ]
+datos_filtrados_geo <- datos %>% 
+  filter(lat <= -34)
+plot(datos_filtrados_geo$lon, datos_filtrados_geo$lat, xlab = "Longitud", ylab = "Latitud")
+#datos_filtro_superficie <- datos_filtrados_geo[datos_filtrados_geo$surface_total <= 5000, ]
+datos_filtro_superficie <- datos_filtrados_geo %>% 
+  filter(surface_total <= 5000)
+
+cubierta_supera_total <- !is.na(datos_filtro_superficie$surface_covered) & !is.na(datos_filtro_superficie$surface_total) & datos_filtro_superficie$surface_covered > datos_filtro_superficie$surface_total
+datos_filtro_superficie[cubierta_supera_total, c("surface_covered", "surface_total")] <- datos_filtro_superficie[cubierta_supera_total, c("surface_total", "surface_covered")]
+
+
+#Chequeamos que los outliers de precio sean datos verosímiles
+datos_filtro_superficie[datos_filtro_superficie$price>=4e5, ]
+
+#Más preprocesamiento de los datos:
+
+sup_no_nula <- !is.na(datos_filtro_superficie$surface_total) & !is.na(datos_filtro_superficie$surface_covered) & (datos_filtro_superficie$surface_total != 0) & (datos_filtro_superficie$surface_covered != 0)
+proporcion_sup_cubierta <- datos_filtro_superficie[sup_no_nula, "surface_covered"]/datos_filtro_superficie[sup_no_nula,  "surface_total"]
+
+datos_filtro_superficie$surface_covered[is.na(datos_filtro_superficie$surface_covered)] <- datos_filtro_superficie$surface_total[is.na(datos_filtro_superficie$surface_covered)]*median(proporcion_sup_cubierta$surface_covered)
+
+datos_filtro_superficie$surface_total[is.na(datos_filtro_superficie$surface_total)] <- datos_filtro_superficie$surface_covered[is.na(datos_filtro_superficie$surface_total)]
+
+plot(datos_filtro_superficie$surface_covered ~ datos_filtro_superficie$surface_total, xlab = "Superficie total", ylab = "Superficie cubierta")
+
+datos_filtro_superficie$bathrooms[is.na(datos_filtro_superficie$bathrooms)] <- 1
+condicion = (is.na(datos_filtro_superficie$bedrooms)) & !is.na(datos_filtro_superficie$rooms) & (datos_filtro_superficie$rooms>1)
+datos_filtro_superficie$bedrooms[condicion] <- datos_filtro_superficie$rooms[condicion] - 1
+
+#null en cantidad de ambientes
+rooms_nulo = is.na(datos_filtro_superficie$rooms) & !is.na(datos_filtro_superficie$bedrooms)
+datos_filtro_superficie$rooms[rooms_nulo] <- datos_filtro_superficie$bedrooms[rooms_nulo] + 1
+
+rooms_nulo_banio_no_nulo = is.na(datos_filtro_superficie$rooms) & !is.na(datos_filtro_superficie$bathrooms)
+#monoambiente
+rooms_nulo_banio_unico = rooms_nulo_banio_no_nulo & (datos_filtro_superficie$bathrooms == 1)
+datos_filtro_superficie$rooms[rooms_nulo_banio_unico] <- 1
+rooms_nulo_banio_unico_bedrooms_nulo = rooms_nulo_banio_unico & is.na(datos_filtro_superficie$bedrooms)
+datos_filtro_superficie$bedrooms[rooms_nulo_banio_unico_bedrooms_nulo] <- 1
+
+rooms_nulo_mas_de_un_banio = rooms_nulo_banio_no_nulo & (datos_filtro_superficie$bathrooms > 1)
+datos_filtro_superficie$rooms[rooms_nulo_mas_de_un_banio] <- datos_filtro_superficie$bathrooms[rooms_nulo_mas_de_un_banio] + 1
+
+#null en cantidad de habitaciones
+bedrooms_nulo_banio_unico = !is.na(datos_filtro_superficie$rooms) & is.na(datos_filtro_superficie$bedrooms) & (datos_filtro_superficie$bathrooms == 1) & (datos_filtro_superficie$rooms == 1)
+bedrooms_nulo_mas_de_un_banio = !is.na(datos_filtro_superficie$rooms) & is.na(datos_filtro_superficie$bedrooms) & (datos_filtro_superficie$bathrooms > 1) & (datos_filtro_superficie$rooms > 1)
+#monoambiente
+datos_filtro_superficie$bedrooms[bedrooms_nulo_banio_unico] <- 1
+datos_filtro_superficie$bedrooms[bedrooms_nulo_mas_de_un_banio] <- datos_filtro_superficie$rooms[bedrooms_nulo_mas_de_un_banio] - 1
+
+
+datos <- datos_filtro_superficie
+
+#Sacamos la primera entrada de la base por ser un "Edificio de departamentos tipo PH" que es más bien un conjunto de 7 PHs
+datos[1,]
+datos <- datos[-1, ]
+
+#se elimina un dato duplicado
+datos[c(243,304),]
+datos <-datos[-304, ]
+
+hist(datos$price, main = "", xlab = "Precio", ylab = "Frecuencia")
+boxplot(datos$price, main = "Precio")
+hist(datos$rooms, main = "", xlab = "Ambientes", ylab = "Frecuencia")
+hist(datos$bedrooms, main = "", xlab = "Habitaciones", ylab = "Frecuencia")
+hist(datos$bathrooms, main = "", xlab = "Baños", ylab = "Frecuencia")
+
+```
+
+# Análisis exploratorio y descriptivo
+
+Se realiza un análisis exploratorio y descriptivo (EDA) de cada una de las variables cuantitativas. Se presenta la información en la siguiente tabla, conteniendo las siguientes medidas descriptivas:
+
+Cantidad de datos, mínimo, máximo, media, mediana, moda, varianza, desviación estándar, coeficiente de variación, cuartil 1, cuartil 3, rango intercuartílico, MAD, asimetría, curtosis.
+
+```{r funcion_resumen, include=FALSE}
+resumen <- function(datos){
+
+conteo <- function(x) {return(sum(!is.na(x)))}
+coefvar <- function(x) {return(sd(x,na.rm=TRUE)/mean(x,na.rm=TRUE))}
+mode <- function(x) {return(as.numeric(names(which.max(table(x)))))}
+cantidad <- sapply(datos, conteo)
+minimo <- sapply(datos, min, na.rm=TRUE)
+maximo <- sapply(datos, max, na.rm=TRUE)
+media <- sapply(datos, mean, na.rm=TRUE)
+mediana <- sapply(datos, median, na.rm=TRUE)
+moda <- sapply(datos, mode)
+varianza <- sapply(datos, var, na.rm=TRUE)
+desvio_estandar <- sapply(datos, sd, na.rm=TRUE)
+coef_variacion <- sapply(datos, coefvar)
+cuartil1 <- sapply(datos, quantile, 0.25, na.rm=TRUE)
+cuartil3 <- sapply(datos, quantile, 0.75, na.rm=TRUE)
+RIC <- sapply(datos, IQR, na.rm=TRUE)
+MAD <- sapply(datos, mad, na.rm=TRUE)
+asimetria <- sapply(datos, skewness, na.rm=TRUE)
+kurtosis <- sapply(datos, kurtosis, na.rm=TRUE)
+res <- as.data.frame(list(cantidad,minimo,maximo,media,mediana,moda,varianza,desvio_estandar,coef_variacion,cuartil1,cuartil3,RIC,MAD,asimetria,kurtosis))
+columnas <- c("Cantidad", "Mínimo", "Máximo", "Media", "Mediana", "Moda", "Varianza", "Desvío estándar", "Coef. de variación", "Cuartil 1", "Cuartil 3", "Rango intercuartílico", "MAD", "Asimetría", "Kurtosis")
+colnames(res) <- columnas
+return(res)}
+```
+
+```{r eda_cuantitativas}
+vars_cuanti <- c("lat", "lon", "rooms", "bedrooms", "bathrooms", "surface_total", "surface_covered", "price")
+
+datos_cuanti <- datos[, vars_cuanti]
+
+resumen_cuanti <- resumen(datos_cuanti)
+
+resumen_cuanti
+```
+
+# Tabla de frecuencias y porcentajes de las variables cualitativas
+
+A continuación se presenta una tabla de frecuencias y porcentaje para las variables cualitativas (categóricas).
+En la primera tabla se consignan la cantidad de registros en cuya descripción figuró alguna de las palabras clave enumeradas y el porcentaje que representan respecto del total. Las palabras clave con mayor frecuencia fueron: expensas, terraza y escalera.
+
+En la segunda tabla se indica qué cantidad y porcentaje de propiedades se hallaron para cada barrio de Capital Federal. Se puede apreciar que los barrios mejor representados son Palermo, Villa Crespo y Almagro.
+
+```{r tablas_cualitativas_codigo, include=FALSE}
+columnas_dummies <- c("luminoso", "reciclado", "expensas", "espectacular", "quincho", "terraza", "escalera", "galeria")
+
+tabla_frec_dummies <- function(df, columnas){
+  tabla <- data.frame(Variable = character(0), Frecuencia = integer(0), Porcentaje = numeric(0), stringsAsFactors = FALSE)
+  for (columna in columnas) {
+    conteo <- sum(df[[columna]] == 1)
+    proporcion <- conteo/sum(!is.na(df[[columna]]))
+    fila <- data.frame(Variable = columna, Frecuencia = conteo, Porcentaje = proporcion*100)
+    tabla <- bind_rows(tabla, fila)
+  }
+  return(tabla)
+}
+```
+
+```{r tablas_cualitativas}
+
+tabla_frec <- tabla_frec_dummies(datos, columnas_dummies)
+tabla_frec
+
+frec_barrios <- table(datos$l3)
+total_barrios <- sum(!is.na(datos$l3))
+porcentaje_barrios <- 100*frec_barrios/total_barrios
+frec_df <- as.data.frame(frec_barrios)
+porcentaje_df <- as.data.frame(porcentaje_barrios)
+tabla_barrios <- cbind(frec_df, porcentaje_df[[2]])
+colnames(tabla_barrios) <- c("Barrio","Frecuencia", "Porcentaje")
+
+tabla_barrios[order(-tabla_barrios[,2]),]
+
+```
+# Graficación de las variables cualitativas
+A continuación se presentan dos gráficos que representan la cantidad de registros en cuya descripción figuró alguna de las palabras clave presentadas en la tabla del punto anterior. Se muestra frecuencia absoluta y porcentaje del total respectivamente.
+
+En concordancia con la segunda tabla presentada en el punto anterior se realizó un gráfico de tortas, con los porcentajes de propiedades hallados en los principales barrios de Capital Federal.
+
+
+```{r graficos_cualitativas}
+ggplot(tabla_frec,aes(x=factor(Variable),y=Frecuencia))+
+  geom_col(color='black',fill='cyan3')+
+  xlab('')
+
+ggplot(tabla_frec,aes(x=factor(Variable),y=Porcentaje))+
+  geom_col(color='black',fill='cyan3')+
+  xlab('')
+
+porcentajes <- prop.table(frec_barrios) * 100
+porcentajes_ordenados <- sort(porcentajes, decreasing = TRUE)
+nro_categorias = 12
+categorias_top <- names(porcentajes_ordenados)[1:nro_categorias]
+otros_porcentaje <- sum(porcentajes_ordenados[7:length(porcentajes_ordenados)])
+nueva_tabla <- c(porcentajes_ordenados[1:nro_categorias], "Otros barrios" = otros_porcentaje)
+pie(nueva_tabla, labels = paste(names(nueva_tabla), ": ", round(nueva_tabla, 2), "%"), main = "PH por barrio")
+```
+
+# Clasificación jerárquica
+A continuación se realizó un análisis de clustering teniendo en cuenta las siguientes variables cuantitativas:
+
+Latitud, Longitud, Número de ambientes, Superficie total, Superficie cubierta y Precio.
+
+No se incluyeron las variables Cantidad de habitaciones y Cantidad de baños por ser variables correlacionadas entre sí y con número de ambientes. Las variables se estandarizaron previamente al análisis.
+
+Se tomó la distancia euclídea para elaborar la matriz de distancias o disimilitud. Como algoritmo de ligamiento se empleó el promedio (average linkage) por presentar el mayor índice de correlación cofenética, respecto de las otras alternativas: el completo, el simple, y Ward.
+
+Se utilizó el método del codo (elbow) para fijar el número de clusters. A partir del gráfico de sumas de cuadrados dentro de los clusters en función del número de clusters, se tomó el punto donde se observaba una disminución significativa de dicha magnitud, resultando en seis grupos.
+
+A continuación, se graficó el dendrograma correspondiente, y según con el criterio elegido, se realizó el corte en seis grupos. En este dendrograma ya se puede apreciar que existe un grupo mayoritario (379 observaciones), luego un grupo minoritario (23 observaciones), y luego grupos conformados por pocas observaciones, o sólo una observación.
+
+Esto se observa mejor cuando se grafican los grupos en los ejes del PCA, donde se detecta que el grupo mayoritario está integrado por propiedades de menor precio, superficie y cantidad de ambientes. El grupo que le sigue en número se asocia a valores más altos de dichas variables.
+
+No es tan significativo el análisis minucioso de los grupos de unas pocas observaciones que se forman, ya que estos se distinguen por la conjunción de características particulares que los separan de los clusters más grandes: precio muy elevado, superficie cubierta muy alta (puede ser un efecto de la imputación que realizamos en nuestro preprocesamiento de los datos).
+
+En este sentido, se analizaron los resultados de realizar un clustering jerárquico, con el método de ligamiento promedio, y fijando un k = 2 (no se muestran los resultados). Se vio que los grupos formados no eran los esperables, quedando unas pocas observaciones extremas separadas del resto.
+
+Cabe señalar que estando las variables estandarizadas, e incluyéndose dos variables de superficie (total y cubierta), es como si, conceptualmente, la superficie pesara el doble que el resto de las variables). Este punto y el tener variables correlacionadas como el número de ambientes, la superficie y el precio, pueden afectar los resultados del clustering.
+
+
+```{r clustering}
+vars_cuanti_cluster <- c("lat", "lon", "rooms", "surface_total", "surface_covered", "price")
+
+datos_cuanti_cluster <- na.omit(datos[, vars_cuanti_cluster])
+
+datos_cuanti_cluster_std <- scale(datos_cuanti_cluster)
+mat_dist <- dist(x = datos_cuanti_cluster_std, method = "euclidean") 
+
+hc_complete <- hclust(d = mat_dist, method = "complete") 
+hc_average <- hclust(d = mat_dist, method = "average")
+hc_single <- hclust(d = mat_dist, method = "single")
+hc_ward <- hclust(d = mat_dist, method = "ward.D2")
+cor(x = mat_dist, cophenetic(hc_complete))
+cor(x = mat_dist, cophenetic(hc_average))
+cor(x = mat_dist, cophenetic(hc_single))
+cor(x = mat_dist, cophenetic(hc_ward))
+
+#average linkage es la que resultó mejor, seguimos con esa
+library(factoextra)
+fviz_nbclust(x = datos_cuanti_cluster_std, FUNcluster = hcut,hc_method ="average",stand=TRUE, method = "wss", diss = dist(datos_cuanti_cluster_std, method = "euclidean"))
+
+#el coeficiente de Silhouette da 2 grupos
+#fviz_nbclust(x = datos_cuanti_cluster_std, FUNcluster = hcut,hc_method ="average",stand=TRUE, method = "silhouette", diss = dist(datos_cuanti_cluster_std, method = "euclidean"))
+#el estadístico gap da 1 grupo
+#fviz_nbclust(x = datos_cuanti_cluster_std, FUNcluster = hcut,hc_method ="average",stand=TRUE, method = "gap", diss = dist(datos_cuanti_cluster_std, method = "euclidean"))
+grupos = 6
+plot(hc_average, labels = FALSE)
+clusters = cutree(hc_average, k = grupos)
+rect.hclust(hc_average, k=grupos, border="red")
+
+fviz_cluster(object = list(data = datos_cuanti_cluster_std, cluster = cutree(hc_average, k = grupos)), ellipse.type = "convex", repel = TRUE, show.clust.cent = FALSE) + theme_bw()
+
+cluster_pca <- prcomp(datos_cuanti_cluster_std)
+fviz_pca_biplot(cluster_pca, label = "var")
+
+#Hay PHs individuales que se separan por sus características, pero básicamente se distinguen dos grandes grupos
+#Grupos minoritarios: detalle de los registros
+datos_cuanti_cluster[c(393,261,364), ]
+datos_cuanti_cluster[which(clusters == 3), ]
+datos[c(393,261,364), ]
+datos[which(clusters == 3), ]
+
+#Cantidades de los grupos mayoritarios:
+sum(clusters == 1)
+sum(clusters == 2)
+#Medidas de resumen de los clusters mayoritarios
+resumen(datos_cuanti[which(clusters == 1),])
+resumen(datos_cuanti[which(clusters == 2),])
+```
+Para complementar el análisis anterior, utilizamos además el método de ligamiento Ward o de varianza mínima para el clustering jerárquico. El gráfico de la suma de cuadrados dentro en función del número de grupos, no es de interpretación tan inmediata como en el caso del ligamiento promedio puesto que hay un descenso abrupto para k=2, pero sigue disminuyendo considerablemente hasta k=5. Se elige k=5 (el método de Silhouette arroja un resultado similar, por eso no lo se lo incluye).
+
+El análisis más inmediato del dendrograma resultante permite apreciar que se formaron grupos más homogéneos, en consonancia con las características del método de ligamiento elegido. Si se observa cómo quedaron agrupados los puntos en los ejes del PCA, se verá que este agrupamiento es similar al arrojado por el método de k-means (y la interpretación de los grupos también será similar). Asimismo, un punto a destacar es que los grupos también tienen una cantidad de observaciones más homogénea entre ellos y, a diferencia del método de ligamiento promedio, no nos arroja grupos con una, dos, o unas pocas observaciones.
+
+También se muestran los resultados de la corrida con k = 2. En los ejes del PCA, se puede apreciar que se forman dos grupos con un número considerable de observaciones, que se condicen con distintos rangos de precio, superficie total y cubierta, y cantidad de ambientes.
+
+```{r clustering_ward}
+#Ward
+
+fviz_nbclust(x = datos_cuanti_cluster_std, FUNcluster = hcut,hc_method ="ward",stand=TRUE, method = "wss", diss = dist(datos_cuanti_cluster_std, method = "euclidean"))
+#el coeficiente de Silhouette da 2 grupos
+#fviz_nbclust(x = datos_cuanti_cluster_std, FUNcluster = hcut,hc_method ="ward",stand=TRUE, method = "silhouette", diss = dist(datos_cuanti_cluster_std, method = "euclidean"))
+
+grupos_ward = 5
+plot(hc_ward, labels = FALSE)
+clusters_ward = cutree(hc_ward, k = grupos_ward)
+rect.hclust(hc_ward, k=grupos_ward, border="red")
+
+fviz_cluster(object = list(data = datos_cuanti_cluster_std, cluster = cutree(hc_ward, k = grupos_ward)), ellipse.type = "convex", repel = TRUE, show.clust.cent = FALSE) + theme_bw()
+
+for (i in 1:grupos_ward) {
+  print(paste("Observaciones en el grupo", i, ":", sum(clusters_ward == i)))
+}
+
+grupos_reducido = 2
+plot(hc_ward, labels = FALSE)
+clusters_reducido = cutree(hc_ward, k = grupos_reducido)
+rect.hclust(hc_ward, k=grupos_reducido, border="red")
+
+fviz_cluster(object = list(data = datos_cuanti_cluster_std, cluster = cutree(hc_ward, k = grupos_reducido)), ellipse.type = "convex", repel = TRUE, show.clust.cent = FALSE) + theme_bw()
+
+fviz_pca_biplot(cluster_pca, label = "var")
+
+
+for (i in 1:grupos_reducido) {
+  print(paste("Observaciones en el grupo", i, ":", sum(clusters_reducido == i)))
+}
+
+```
+
+# K-means
+
+Para elegir la cantidad óptima de grupos, el valor de k, se emplea nuevamente el método del codo por considerar que éste es el que brinda más información en nuestro caso particular de aplicación. La suma de cuadrados dentro parece reducirse en forma más drástica hasta k=5, y luego se estabiliza. Es por esto que realizamos el análisis de las k-medias con un k fijado en cinco grupos.
+
+De graficar el resultado del análisis en los primeros dos ejes del PCA, se puede concluir lo siguiente. En primer lugar, el método ha formado tres grupos más a la izquierda, con precio y superficie más bajos, que se distinguen entre ellos por la latitud, es decir por la ubicación geográfica. Seguidamente, se tiene el grupo 1, con valores de precio y superficie intermedios, y por último al grupo 5 que reúne las propiedades con valores más extremos de precio y superficie. Este último grupo resulta en un agrupamiento un tanto artificial, porque como podemos apreciar en el biplot, la distancia al centroide es muy variable entre las observaciones del grupo, y en algunos casos comparativamente grande.
+
+Cabe senalar que este método ha arrojado grupos considerablemente más equilibrados en cuanto a la cantidad de observaciones que contienen que el método de clustering jerárquico con método de ligamiento promedio. A esto se puede agregar el hecho de que la diferencia no puede provenir de los datos, ya que se emplearon las mismas variables (estandarizadas) para ambos análisis. La diferencia observada proviene del método de k-means, que se basa en calcular distancias a centroides, y que tiende a conformar grupos esféricos.
+
+
+```{r k-means}
+fviz_nbclust(x = datos_cuanti_cluster_std, FUNcluster = kmeans, method = "wss", 
+             diss = dist(datos_cuanti_cluster_std, method = "euclidean")) #+   geom_vline(xintercept = 5, linetype = 2)
+#El coeficiente de Silhouette da 2 grupos
+#fviz_nbclust(x = datos_cuanti_cluster_std, FUNcluster = kmeans, method = "silhouette", 
+#             diss = dist(datos_cuanti_cluster_std, method = "euclidean"))
+#El estadístico gap da 1 grupo
+#fviz_nbclust(x = datos_cuanti_cluster_std, FUNcluster = kmeans, method = "gap_stat", 
+#             diss = dist(datos_cuanti_cluster_std, method = "euclidean"))
+
+set.seed(893)
+km_clusters <- kmeans(x = datos_cuanti_cluster_std, centers = 5, nstart = 25)
+fviz_cluster(object = km_clusters, data = datos_cuanti_cluster_std, show.clust.cent = TRUE, ellipse.type = "euclid", star.plot = TRUE, repel = TRUE) + 
+  theme_bw() # + theme(legend.position = "none")
+cluster_pca <- prcomp(datos_cuanti_cluster_std)
+fviz_pca_biplot(cluster_pca, label = "var")
+
+km_clusters$size
+```
+
+# PCA
+A continuación se realizó un análisis de componentes principales teniendo en cuenta las siguientes variables cuantitativas:
+
+Latitud, Longitud, Número de ambientes, Cantidad de baños, Cantidad de habitaciones, Superficie total, Superficie cubierta y Precio.
+
+Las variables se estandarizaron previamente al análisis.
+En primer lugar, del gráfico de correlaciones se puede extraer que salvo por la ubicación geográfica, el resto de las variables se encuentran correlacionadas positivamente, es decir, en forma directa, entre sí.
+
+Si se analiza el porcentaje de la varianza explicada a medida que se agregan componentes principales, se puede detectar que con los primeros dos ejes se explica aproximadamente un 70% de la varianza, lo cual se considera suficiente. Al mismo tiempo, este criterio subjetivo es compatible con el resultado arrojado por el Scree-plot, si se sigue el criterio de Kaiser, donde se aprecia que los primeros dos ejes presentan autovalores mayores a 1.
+
+Del biplot correpondiente a mostrar las variables y las observaciones en los dos primeros ejes del PCA, se puede concluir que hay dos tipos de variables principales: las primeras son proxy del tamaño de la propiedad: número de ambientes, habitaciones, baños, superficie total y cubierta. El segundo eje está correlacionado fuertemente con la latitud, y el tercero, que no se muestra en gráficamente pero sí en la tabla que se muestra al final de la sección, donde se encuentran los loadings o cargas, está fuertemente correlacionado con la longitud. Por esta razón podríamos afirmar que existe un segundo grupo de dos variables que son la ubicación geográfica. El precio está más correlacionado (y en forma directa) con el primer grupo de variables que con el segundo.
+
+Este resultado es lógico dado que el PCA detecta correlaciones, a lo cual subyace la idea de linealidad, y el precio está ligado, en términos geográficos, a los distintos barrios, lo cual sigue una lógica diferente a la lineal con la latitud y la longitud.
+
+```{r pca}
+vars_cuanti_pca <- c("lat", "lon", "rooms", "bathrooms", "bedrooms", "surface_total", "surface_covered", "price")
+
+datos_cuanti_pca <- na.omit(datos[, vars_cuanti_pca])
+
+library(corrplot)
+
+m_cor <- cor(datos_cuanti_pca)
+corrplot(m_cor,
+         method="circle",
+         type = "upper",
+         diag= FALSE) 
+
+datos_cuanti_pca_std <- data.frame(scale(datos_cuanti_pca))
+
+pca <- prcomp(datos_cuanti_pca, scale = TRUE)
+
+prop_varianza <- pca$sdev^2 / sum(pca$sdev^2)
+prop_varianza_acum <- cumsum(prop_varianza)
+round(prop_varianza_acum*100,2)
+
+screeplot(pca, type = "l", npcs = 8)
+abline(h = 1, col="red", lty=5)
+legend("topright", legend=c("autovalor = 1"),
+       col=c("red"), lty=5, cex=0.6)
+
+
+library(ggfortify)
+
+autoplot(pca, 
+         data = datos_cuanti_pca, 
+         loadings = TRUE, 
+         loadings.colour = 'black',
+         loadings.label = TRUE, 
+         loadings.label.size = 5)
+
+library(kableExtra)
+round(pca$rotation,2) |> knitr::kable(format = "html") |> 
+  kable_styling()
+
+```
+
+# PCA robusto
+
+Para el PCA robusto se empleó el método del Elipsoide de Volumen Mínimo (MVE).
+La principal diferencia que se observa entre el PCA clásico y el robusto es que en este último, los puntos se encuentran menos aglomerados en el biplot. Para poder visualizar esta diferencia más claramente, se realizó un clustering jerárquico con los mismos parámetros que el mostrado anteriormente, solo que se utilizaron las variables del PCA (se incluyó cantidad de baños y de habitaciones) y se fijó como criterio de corte el formar dos grupos. Estos dos grupos son similares o análogos a los dos grupos más grandes que se observaban en el biplot que mostraba los resultados del clustering jerárquico, en la sección correspondiente (utilizando el método de ligamiento Ward).
+
+En los biplots del PCA clásico y robusto se puede observar como este último separa mejor los puntos de uno de los dos grupos, aparecen como más "elongados" a lo largo del primer componente. Como se puede observar en el gráfico que compara las varianzas explicadas por los componentes principales, para el PCA clásico (no robusto) y para el robusto (MVE), emplear el método robusto implicó para este caso de estudio, una pérdida de la proporción de la varianza explicada por los primeros ejes.
+
+Como se puede apreciar en los biplots, en el PCA robusto las variables también aparecen más separadas entre sí, y esto se puede apreciar en los loadings, donde vemos que las correlaciones de las variables originales con los ejes no son tan extremas (muy próximas a 1 o -1, o a 0) y están repartidas más "equitativamente" (se observan coeficientes de correlación intermedios). Otro punto para destacar es que la latitud y la longitud parecen más ortogonales en el biplot del PCA clásico que en el PCA robusto, donde se encuentran prácticamente alineadas.
+
+```{r pca_robusto}
+set.seed(893)
+pca_mve <-princomp(datos_cuanti_pca, 
+                   cor=TRUE, 
+                   scores=TRUE,
+                   covmat=MASS::cov.mve(datos_cuanti_pca)) #empleamos MVE con datos estandarizados
+
+screeplot(pca_mve, type = "l", npcs = 7)
+abline(h = 1, col="red", lty=5)
+legend("topright", legend=c("Autovalor = 1"),
+col=c("red"), lty=5, cex=0.6)
+
+
+autoplot(pca_mve, 
+         data = datos_cuanti_pca_std, 
+         loadings = TRUE, 
+         loadings.colour = 'black',
+         loadings.label = TRUE, 
+         loadings.label.size = 5)
+
+mat_dist_pca <- dist(x = datos_cuanti_pca_std, method = "euclidean") 
+hc_ward_pca <- hclust(d = mat_dist_pca, method = "ward.D2")
+clusters_pca = cutree(hc_ward_pca, k = 2)
+
+theme <- theme(text = element_text(size=10),
+               plot.title = element_text(size=12, face="bold.italic",
+               hjust = 0.5),
+               axis.title.x = element_text(size=10, face="bold", colour='black'),
+               axis.title.y = element_text(size=10, face="bold"),
+               panel.border = element_blank(),
+               panel.grid.major = element_blank(),
+               panel.grid.minor = element_blank(), 
+               legend.title = element_text(face="bold"))
+
+library(ggbiplot)
+#Comparación de biplots
+#Biplot del PCA clásico
+ggbiplot(pca, obs.scale=0.1 ,var.scale=1,alpha=0.5
+         ,groups=factor(clusters_pca)) + theme
+#Biplot del PCA robusto (MVE)
+ggbiplot(pca_mve, obs.scale=0.1 ,var.scale=1,alpha=0.5
+         ,groups=factor(clusters_pca)) + theme
+
+library(ggpubr)
+
+par(mfrow=c(2,1))
+p1 <-fviz_eig(pca_mve, ncp =5, addlabels = TRUE, main="MVE")
+p2<- fviz_eig(pca, ncp =5, addlabels = TRUE, main="No robusto")
+ggarrange(p1,p2, nrow = 1, ncol = 2)
+
+pca_mve$loadings
+```
+
+# Análisis de correspondencias simple
+
+A fin de realizar el análisis de correspondencias, se discretizaron las siguiente variables cuantitativas:
+
+Precio, Latitud, Longitud, Superficie total, Superficie cubierta y Número de ambientes.
+
+En cada caso se eligieron tres categorías, y los datos se repartieron en forma uniforme en cada una de las categorías. Es decir, cada categoría contiene 1/3 de los datos.
+
+Para el análisis de correpondencias simple se emplearon las variables, así discretizadas: Precio y Superficie total.
+Como en la tabla de frecuencias esperadas correspondiente a la tabla de contingencia se detectaron celdas con frecuencias menores a 5, se fusionaron las categorías media y alta de ambas variables, para poder realizar el test de independencia de Chi-cuadrado. 
+
+Con la tabla así construída, con dos variables ahora dicotómicas, se realizó el test de independencia de Chi-cuadarado. El test resulta significativo (p<0.05), es decir que las variables son dependientes. Este resultado no es sorprendente si se observan los gráficos de Precio según Superficie total, o si se observan los gráficos de perfiles (para los datos subdivididos en tres categorías por variable).
+
+Puesto que el test de independencia fue significativo, se abre paso al Análisis de Correspondencias Simple (CA), para el cual empleamos los datos subdivididos en tres categorías por variable. Como es de esperar, se puede apreciar que el primer componente absorbe la mayor parte de la inercia total, y de hecho, a lo largo de este eje vemos que se van ordenando las observaciones con precio bajo y superficie total baja en un extremo, en el medio las de precio medio y superficie total media, y en extremo opuesto los valores altos de ambas variables.
+
+Si se observa la contribución de filas y de columnas a la inercia total, podemos concluir que las categorías que más contribuyen a la falta de independencia son Precio Alto y Superficie total Alta.
+
+```{r ca}
+library(FactoMineR)
+
+datos_discretizados <- data.frame(
+rango_precio <- cut(datos$price, breaks = 3, labels = c("Bajo", "Medio", "Alto")),
+rango_lon <- cut(datos$lon, breaks = 3, labels = c("Oeste", "Centro", "Este")),
+rango_lat <- cut(datos$lat, breaks = 3, labels = c("Sur", "Centro", "Norte")),
+rango_sup_cub <- cut(datos$surface_covered, breaks = 3, labels = c("Baja", "Media", "Alta")),
+rango_sup_tot <- cut(datos$surface_total, breaks = 3, labels = c("Baja", "Media", "Alta")),
+rango_cant_amb <- cut(datos$rooms, breaks = 3, labels = c("Baja", "Media", "Alta"))
+)
+colnames(datos_discretizados) = c("Precio","Lon", "Lat", "Sup_cubierta", "Sup_total", "Cant_amb")
+datos_discretizados = na.omit(datos_discretizados)
+
+tabla_frecuencias = table(datos_discretizados$Precio, datos_discretizados$Sup_total)
+
+
+dimnames(tabla_frecuencias)<-list(Precio=c("Bajo","Medio","Alto"),Sup_total=c("Baja","Media","Alta"))
+#rownames(tabla_frecuencias) <-  paste("Precio_", rownames(tabla_frecuencias), sep = "")
+#colnames(tabla_frecuencias) <-  paste("Sup_total_", colnames(tabla_frecuencias), sep = "")
+df_frecuencias = as.data.frame.table(tabla_frecuencias)
+df_frecuencias_exp <- df_frecuencias[rep(1:nrow(df_frecuencias), df_frecuencias[,3]),-3]
+
+
+categoria_precio_medio_alto <- ifelse(df_frecuencias_exp$Precio %in% c("Medio", "Alto"), "MedioAlto", "Bajo")
+categoria_sup_total_media_alta <- ifelse(df_frecuencias_exp$Sup_total %in% c("Media", "Alta"), "MediaAlta", "Baja")
+tabla_frecuencias_fusionadas = table(categoria_precio_medio_alto,categoria_sup_total_media_alta)
+dimnames(tabla_frecuencias_fusionadas)<-list(Precio=c("Bajo","Medio-Alto"),Sup_total=c("Baja","Media-Alta"))
+
+tabla_frecuencias
+chisq.test(tabla_frecuencias)$expected
+
+tabla_frecuencias_fusionadas
+
+chisq.test(tabla_frecuencias_fusionadas)
+library(gplots)
+balloonplot(t(as.table(as.matrix(tabla_frecuencias_fusionadas))), main ="Precio según Superficie total", xlab ="", ylab="",
+            label = FALSE, show.margins = FALSE)
+
+par(bg="lightcyan")
+barplot(tabla_frecuencias_fusionadas,beside=TRUE,col= c("aquamarine3","tan1"),ylim=c(0,280),ylab="Cantidad de propiedades")
+mtext("Precio según la Superficie total",cex=1,line=1)
+legend("topright",cex=0.8,title="Precio",c("Bajo","Medio-Alto"), fill=c("aquamarine3","tan1"),horiz=F, box.lty = 0)
+
+prop.table(tabla_frecuencias_fusionadas)
+
+ggplot(data=df_frecuencias_exp, aes(x = Precio, fill= Sup_total))+geom_bar(position='fill', alpha=0.9)+
+  labs(title = 'Distribución de la categoría superficie total según precio',
+              y = 'Frecuencia de propiedades', x = 'Precio') +
+  scale_fill_viridis_d(name='Superficie total') 
+
+precio_sup.ac = CA(tabla_frecuencias,graph=FALSE)
+
+# Contribución de filas y columnas al eje 1
+fviz_contrib(precio_sup.ac,choice="row",axes=1, fill="royalblue",color ="black") + labs(title = 'Contribución de filas',  x = 'Precio', y = 'Contribución (%)')
+fviz_contrib(precio_sup.ac,choice="col",axes=1, fill="royalblue",color ="black") + labs(title = 'Contribución de columnas',  x = 'Superficie', y = 'Contribución (%)')
+fviz_ca_biplot( precio_sup.ac , repel  =TRUE, col.row="royalblue",col.col="indianred") + labs(title='Biplot Análisis de correspondencias Simple')
+```
+
+# Análisis de correspondencias múltiple
+Para el análisis de correspondencias múltiple (MCA), se emplearon todas las variables que se habían categorizado en el punto anterior.
+
+Como se puede apreciar en el Scree-plot correspondiente, el primer eje es el que más absorbe de la inercia total, y luego la contribución es pareja. Elegimos dos ejes para poder visualizar los puntos en dos dimensiones. Emplear más dimensiones, o sea mostrar los biplots para las distintas combinaciones de ejes complicaría el análisis y la interpretación.
+
+En el biplot de los dos primeros ejes se puede apreciar cómo las observaciones que tienen precio alto también tienen superficie total y cubierta alta, y estas observaciones son comparativamente pocas, en comparación con las restantes. De hecho la mayor parte de las observaciones se concentran en los valores bajos de las variables, y la nube de puntos se va elongando y dispersando hacia los valores medios de precio y de superficie total y cubierta.
+
+Algunas de las observaciones que más aportan a la inercia total, que se separan del resto y están asociadas a valores altos de las variables, ya habían sido identificadas en el clustering jerárquico realizado con el método de ligamiento promedio.
+
+```{r mca}
+datos.mca <- MCA(datos_discretizados, graph = FALSE)
+#Loadings
+datos.mca$var$coord
+fviz_screeplot(datos.mca, addlabels = TRUE)
+fviz_mca_biplot( datos.mca , repel  =TRUE, col.ind="cos2",invisible="quali")
+```
